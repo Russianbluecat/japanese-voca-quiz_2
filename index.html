@@ -104,13 +104,47 @@
   .stat-value.good { color: var(--correct); }
   .stat-value.bad { color: var(--wrong); }
 
+  /* Timer */
+  .timer-wrap {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .timer-bar-bg {
+    flex: 1;
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+    max-width: 320px;
+  }
+  .timer-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    border-radius: 3px;
+    transition: width 1s linear, background 0.5s;
+    width: 100%;
+  }
+  .timer-bar-fill.danger { background: linear-gradient(90deg, var(--wrong), #ff4444); }
+  .timer-num {
+    font-family: 'Space Mono', monospace;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text);
+    min-width: 28px;
+    text-align: right;
+  }
+  .timer-num.danger { color: var(--wrong); }
+
   /* Quiz arena */
   .quiz-arena {
     position: relative;
     display: grid;
     grid-template-columns: 1fr auto 1fr;
     gap: 0;
-    align-items: start;
+    align-items: stretch;
     min-height: 400px;
   }
 
@@ -124,9 +158,10 @@
     z-index: 5;
   }
 
+  /* Equal height columns via grid */
   .column {
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-rows: auto repeat(4, 1fr);
     gap: 10px;
     padding: 0 8px;
   }
@@ -151,6 +186,10 @@
     transition: all 0.18s ease;
     user-select: none;
     text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
   }
 
   .word-card:hover {
@@ -381,8 +420,8 @@
       <span class="stat-value" id="round-num">1</span>
     </div>
     <div class="stat">
-      <span class="stat-label">총 단어</span>
-      <span class="stat-value" id="total-words">—</span>
+      <span class="stat-label">진행</span>
+      <span class="stat-value" id="total-words">—/10</span>
     </div>
     <div class="stat">
       <span class="stat-label">정답</span>
@@ -400,6 +439,12 @@
     </div>
 
     <div id="quiz-area" style="display:none;">
+      <div class="timer-wrap">
+        <div class="timer-bar-bg">
+          <div class="timer-bar-fill" id="timer-bar"></div>
+        </div>
+        <div class="timer-num" id="timer-num">20</div>
+      </div>
       <div class="message" id="msg-box"></div>
       <div class="quiz-arena" id="arena">
         <svg id="line-canvas"></svg>
@@ -441,6 +486,8 @@
 const SHEET_ID = '1F-MzECDTU_S_6lR6_FJLpXOAih4Kg1SjHTCUeqgzOqo';
 const SHEET_NAME = 'Raw_Data';
 const ITEMS_PER_ROUND = 4;
+const TOTAL_ROUNDS = 10;
+const ROUND_TIME = 20;
 
 let allWords = [];
 let usedIndices = new Set();
@@ -451,8 +498,10 @@ let matched = {};
 let scoreCorrect = 0;
 let scoreWrong = 0;
 let round = 1;
-let totalRounds = 0;
 let lines = [];
+let timerInterval = null;
+let timeLeft = ROUND_TIME;
+let roundEnded = false;
 
 // ── Load data ──────────────────────────────────────────────
 async function loadData() {
@@ -501,8 +550,8 @@ async function loadData() {
     return;
   }
 
-  document.getElementById('total-words').textContent = allWords.length;
-  totalRounds = Math.ceil(allWords.length / ITEMS_PER_ROUND);
+  document.getElementById('total-words').textContent = `1/${TOTAL_ROUNDS}`;
+  totalRounds = TOTAL_ROUNDS;
   document.getElementById('loading-screen').style.display = 'none';
   startRound();
 }
@@ -528,27 +577,29 @@ function parseCSV(text) {
 
 // ── Round management ───────────────────────────────────────
 function startRound() {
+  if (round > TOTAL_ROUNDS) { showResults(); return; }
+
   matched = {};
   selectedLeft = null;
   selectedRight = null;
   lines = [];
+  roundEnded = false;
 
+  // Pick random words (allow reuse if pool exhausted)
   const available = allWords.map((_, i) => i).filter(i => !usedIndices.has(i));
-  if (available.length === 0) {
-    showResults();
-    return;
-  }
-
-  const pick = shuffle(available).slice(0, ITEMS_PER_ROUND);
+  let pool = available.length >= ITEMS_PER_ROUND ? available : allWords.map((_, i) => i);
+  const pick = shuffle(pool).slice(0, ITEMS_PER_ROUND);
   pick.forEach(i => usedIndices.add(i));
   currentRound = pick.map(i => allWords[i]);
 
   document.getElementById('round-num').textContent = round;
+  document.getElementById('total-words').textContent = `${round}/${TOTAL_ROUNDS}`;
   document.getElementById('next-btn').style.display = 'none';
   hideMessage();
 
   renderRound();
   document.getElementById('quiz-area').style.display = 'block';
+  startTimer();
 }
 
 function renderRound() {
@@ -594,9 +645,67 @@ function renderRound() {
   });
 }
 
-// ── Selection & matching ───────────────────────────────────
+// ── Timer ──────────────────────────────────────────────────
+function startTimer() {
+  clearInterval(timerInterval);
+  timeLeft = ROUND_TIME;
+  updateTimerUI();
+
+  timerInterval = setInterval(() => {
+    timeLeft--;
+    updateTimerUI();
+    if (timeLeft <= 0) {
+      clearInterval(timerInterval);
+      timeUp();
+    }
+  }, 1000);
+}
+
+function updateTimerUI() {
+  const bar = document.getElementById('timer-bar');
+  const num = document.getElementById('timer-num');
+  const pct = (timeLeft / ROUND_TIME) * 100;
+  bar.style.width = pct + '%';
+  num.textContent = timeLeft;
+  const danger = timeLeft <= 5;
+  bar.classList.toggle('danger', danger);
+  num.classList.toggle('danger', danger);
+}
+
+function timeUp() {
+  if (roundEnded) return;
+  roundEnded = true;
+
+  // Reveal all unmatched correct answers
+  for (let idx = 0; idx < currentRound.length; idx++) {
+    if (matched[idx] !== undefined) continue;
+    const leftCard = document.querySelector(`.word-card[data-side="left"][data-idx="${idx}"]`);
+    const rightCard = document.querySelector(`.word-card[data-side="right"][data-idx="${idx}"]`);
+    if (leftCard) {
+      leftCard.classList.remove('selected');
+      leftCard.classList.add('matched');
+      leftCard.style.opacity = '0.45';
+    }
+    if (rightCard) {
+      rightCard.classList.remove('selected');
+      rightCard.classList.add('matched');
+      rightCard.style.opacity = '0.45';
+    }
+    drawLine(idx, idx, true);
+  }
+
+  showMessage('⏱ 시간 초과! 정답을 확인하세요.', 'error');
+  document.getElementById('next-btn').style.display = 'inline-block';
+}
+
+function stopTimer() {
+  clearInterval(timerInterval);
+}
+
+
 function selectCard(side, idx, card) {
   if (card.classList.contains('matched')) return;
+  if (roundEnded) return;
 
   if (side === 'left') {
     // Deselect previous left
@@ -641,6 +750,8 @@ function checkMatch() {
     selectedRight = null;
 
     if (Object.keys(matched).length === currentRound.length) {
+      roundEnded = true;
+      stopTimer();
       setTimeout(() => {
         showMessage('✓ 라운드 완료!', 'success');
         document.getElementById('next-btn').style.display = 'inline-block';
@@ -708,17 +819,14 @@ function drawLine(leftIdx, rightIdx, correct) {
 }
 
 function nextRound() {
+  stopTimer();
   round++;
   startRound();
 }
 
 function skipRound() {
+  stopTimer();
   round++;
-  const available = allWords.map((_, i) => i).filter(i => !usedIndices.has(i));
-  if (available.length === 0) { showResults(); return; }
-  const pick = shuffle(available).slice(0, ITEMS_PER_ROUND);
-  pick.forEach(i => usedIndices.add(i));
-  currentRound = pick.map(i => allWords[i]);
   startRound();
 }
 
@@ -736,10 +844,12 @@ function showResults() {
 }
 
 function restartQuiz() {
+  stopTimer();
   usedIndices = new Set();
   scoreCorrect = 0;
   scoreWrong = 0;
   round = 1;
+  roundEnded = false;
   document.getElementById('score-correct').textContent = 0;
   document.getElementById('score-wrong').textContent = 0;
   document.getElementById('results-screen').classList.remove('show');
